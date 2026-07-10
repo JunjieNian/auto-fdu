@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fudan-autoelearning"
+version = "0.1.0"
+description = "Fudan eLearning assignment/material collector and reminder framework"
+requires-python = ">=3.10"
+dependencies = [
+  "playwright>=1.52,<2",
+  "python-dotenv>=1.0,<2",
+  "Flask>=3.0,<4",
+]
+
+[project.scripts]
+autoelearning = "autoelearning.cli:main"
+autoelearning-desktop = "autoelearning.desktop_app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

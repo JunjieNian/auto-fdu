@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#17243d">
+  <title>eLearning 助手</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">F</div>
+        <div><strong>eLearning</strong><span>学习事务助手</span></div>
+      </div>
+      <nav id="nav" aria-label="主导航">
+        <button class="nav-item active" data-view="overview"><span>⌂</span>总览</button>
+        <button class="nav-item" data-view="assignments"><span>✓</span>作业</button>
+        <button class="nav-item" data-view="announcements"><span>◉</span>公告</button>
+        <button class="nav-item" data-view="materials"><span>▤</span>课件</button>
+        <button class="nav-item" data-view="courses"><span>▦</span>课程</button>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="privacy-dot"></div>
+        <div><strong>数据仅存本机</strong><span>localhost · 私密会话</span></div>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">复旦大学 eLearning</p>
+          <h1 id="page-title">学习总览</h1>
+        </div>
+        <div class="header-actions">
+          <button id="user-chip" class="user-chip hidden" title="切换登录账号"><span class="avatar">年</span><span><span id="user-name">已登录</span><small>切换账号</small></span></button>
+          <button id="sync-button" class="primary-button"><span class="sync-icon">↻</span>同步 eLearning</button>
+        </div>
+      </header>
+
+      <section id="status-banner" class="status-banner hidden" role="status"></section>
+
+      <section id="overview" class="view active-view">
+        <div class="welcome-card">
+          <div>
+            <p class="eyebrow light">TODAY · <span id="today"></span></p>
+            <h2>把所有课程进度，放在一个安静的地方。</h2>
+            <p>同步作业、公告与课件，截止时间和提交状态一目了然。</p>
+          </div>
+          <div class="orbit" aria-hidden="true"><span></span><i></i><b></b></div>
+        </div>
+        <div class="stats-grid">
+          <article class="stat-card accent-red"><span class="stat-icon">✓</span><div><strong id="stat-assignments">—</strong><span>全部作业</span></div></article>
+          <article class="stat-card accent-blue"><span class="stat-icon">◷</span><div><strong id="stat-pending">—</strong><span>待提交</span></div></article>
+          <article class="stat-card accent-gold"><span class="stat-icon">◉</span><div><strong id="stat-announcements">—</strong><span>课程公告</span></div></article>
+          <article class="stat-card accent-teal"><span class="stat-icon">▤</span><div><strong id="stat-materials">—</strong><span>课件文件</span></div></article>
+        </div>
+        <div class="overview-grid">
+          <section class="panel">
+            <div class="panel-heading"><div><p class="eyebrow">DEADLINES</p><h3>最近作业</h3></div><button class="text-button" data-jump="assignments">查看全部 →</button></div>
+            <div id="recent-assignments" class="item-list loading-list"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-heading"><div><p class="eyebrow">COURSE FEED</p><h3>最新公告</h3></div><button class="text-button" data-jump="announcements">查看全部 →</button></div>
+            <div id="recent-announcements" class="item-list loading-list"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="assignments" class="view">
+        <div class="toolbar"><div class="search-wrap"><span>⌕</span><input id="assignment-search" placeholder="搜索作业或课程"></div><div class="segmented"><button class="active" data-filter="all">全部</button><button data-filter="pending">待提交</button><button data-filter="done">已完成</button></div></div>
+        <div id="assignment-table" class="data-panel"></div>
+      </section>
+
+      <section id="announcements" class="view">
+        <div class="toolbar"><div class="search-wrap wide"><span>⌕</span><input id="announcement-search" placeholder="搜索公告"></div></div>
+        <div id="announcement-list" class="cards-list"></div>
+      </section>
+
+      <section id="materials" class="view">
+        <div class="toolbar"><div class="search-wrap wide"><span>⌕</span><input id="material-search" placeholder="搜索课件、文件或课程"></div></div>
+        <div id="material-list" class="data-panel"></div>
+      </section>
+
+      <section id="courses" class="view"><div id="course-grid" class="course-grid"></div></section>
+    </main>
+  </div>
+
+  <div id="login-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="login-title">
+    <div class="login-card">
+      <div class="login-emblem">F</div>
+      <p class="eyebrow">LOCAL SIGN IN</p>
+      <h2 id="login-title">连接你的 eLearning</h2>
+      <p class="login-copy">账号仅用于本机登录复旦统一身份认证，不会上传到其他服务器。</p>
+      <form id="login-form">
+        <label>学号<input id="username" name="username" autocomplete="username" inputmode="numeric" placeholder="请输入本人学号" required></label>
+        <label>密码<input id="password" name="password" type="password" autocomplete="current-password" placeholder="请输入统一身份认证密码" required></label>
+        <button id="login-button" class="primary-button full" type="submit">登录并连接</button>
+      </form>
+      <p id="login-error" class="form-error hidden"></p>
+      <div class="security-note"><span>●</span> 密码只保存在当前应用进程内</div>
+    </div>
+  </div>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

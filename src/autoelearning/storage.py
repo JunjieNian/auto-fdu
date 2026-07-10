@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from contextlib import AbstractContextManager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable
+
+
+SCHEMA = """
+PRAGMA journal_mode=WAL;
+CREATE TABLE IF NOT EXISTS courses (
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL, course_code TEXT, raw_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS assignments (
+  id INTEGER PRIMARY KEY, course_id INTEGER NOT NULL, name TEXT NOT NULL,
+  due_at TEXT, html_url TEXT, submission_state TEXT, raw_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS announcements (
+  id INTEGER PRIMARY KEY, course_id INTEGER NOT NULL, title TEXT NOT NULL,
+  posted_at TEXT, html_url TEXT, raw_json TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS materials (
+  item_key TEXT PRIMARY KEY, course_id INTEGER NOT NULL, kind TEXT NOT NULL,
+  title TEXT NOT NULL, url TEXT, module_name TEXT, raw_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sync_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL, finished_at TEXT,
+  status TEXT NOT NULL, summary_json TEXT
+);
+"""
+
+
+class Store(AbstractContextManager["Store"]):
+    def __init__(self, path: Path):
+        self.connection = sqlite3.connect(path)
+        self.connection.row_factory = sqlite3.Row
+        self.connection.executescript(SCHEMA)
+
+    def upsert_courses(self, rows: Iterable[dict[str, Any]]) -> None:
+        now = _now()
+        self.connection.executemany(
+            """INSERT INTO courses VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET name=excluded.name, course_code=excluded.course_code,
+            raw_json=excluded.raw_json, updated_at=excluded.updated_at""",
+            [(r["id"], r.get("name") or r.get("course_code") or str(r["id"]), r.get("course_code"), _json(r), now) for r in rows],
+        )
+        self.connection.commit()
+
+    def upsert_assignments(self, course_id: int, rows: Iterable[dict[str, Any]]) -> None:
+        now = _now()
+        values = []
+        for row in rows:
+            submission = row.get("submission") or {}
+            values.append((row["id"], course_id, row.get("name") or str(row["id"]), row.get("due_at"), row.get("html_url"), submission.get("workflow_state"), _json(row), now))
+        self.connection.executemany(
+            """INSERT INTO assignments VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET name=excluded.name, due_at=excluded.due_at,
+            html_url=excluded.html_url, submission_state=excluded.submission_state,
+            raw_json=excluded.raw_json, updated_at=excluded.updated_at""", values,
+        )
+        self.connection.commit()
+
+    def upsert_announcements(self, course_id: int, rows: Iterable[dict[str, Any]]) -> None:
+        now = _now()
+        self.connection.executemany(
+            """INSERT INTO announcements VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET title=excluded.title, posted_at=excluded.posted_at,
+            html_url=excluded.html_url, raw_json=excluded.raw_json, updated_at=excluded.updated_at""",
+            [(r["id"], course_id, r.get("title") or str(r["id"]), r.get("posted_at"), r.get("html_url"), _json(r), now) for r in rows],
+        )
+        self.connection.commit()
+
+    def upsert_materials(self, course_id: int, modules: list[dict[str, Any]], files: list[dict[str, Any]]) -> None:
+        now = _now()
+        values: list[tuple[Any, ...]] = []
+        for module in modules:
+            for item in module.get("items") or []:
+                values.append((f"module:{course_id}:{item.get('id')}", course_id, item.get("type") or "module_item", item.get("title") or str(item.get("id")), item.get("html_url") or item.get("external_url"), module.get("name"), _json(item), now))
+        for item in files:
+            values.append((f"file:{course_id}:{item.get('id')}", course_id, "File", item.get("display_name") or item.get("filename") or str(item.get("id")), item.get("url"), None, _json(item), now))
+        self.connection.executemany(
+            """INSERT INTO materials VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(item_key) DO UPDATE SET title=excluded.title, url=excluded.url,
+            module_name=excluded.module_name, raw_json=excluded.raw_json, updated_at=excluded.updated_at""", values,
+        )
+        self.connection.commit()
+
+    def start_run(self) -> int:
+        cursor = self.connection.execute("INSERT INTO sync_runs(started_at,status) VALUES (?,?)", (_now(), "running"))
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def finish_run(self, run_id: int, status: str, summary: dict[str, Any]) -> None:
+        self.connection.execute("UPDATE sync_runs SET finished_at=?,status=?,summary_json=? WHERE id=?", (_now(), status, _json(summary), run_id))
+        self.connection.commit()
+
+    def upcoming_assignments(self, days: int) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """SELECT a.*, c.name AS course_name FROM assignments a JOIN courses c ON c.id=a.course_id
+            WHERE a.due_at IS NOT NULL AND datetime(a.due_at) >= datetime('now')
+            AND datetime(a.due_at) <= datetime('now', ?) AND COALESCE(a.submission_state,'') NOT IN ('submitted','graded')
+            ORDER BY datetime(a.due_at)""", (f"+{days} days",),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def counts(self) -> dict[str, int]:
+        return {name: self.connection.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0] for name in ("courses", "assignments", "announcements", "materials")}
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.connection.close()
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
