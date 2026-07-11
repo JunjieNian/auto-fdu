@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager
 from typing import Any
+from urllib.parse import unquote
 
 from playwright.sync_api import Browser, BrowserContext, Playwright, sync_playwright
 
@@ -86,6 +87,15 @@ class ElearningSession(AbstractContextManager["ElearningSession"]):
         if self.context is None:
             raise RuntimeError("Session is not open")
         return self.context.request
+
+    def csrf_headers(self) -> dict[str, str]:
+        """Return Canvas' CSRF header without exposing the token to logs."""
+        if self.context is None:
+            raise RuntimeError("Session is not open")
+        for cookie in self.context.cookies(self.settings.base_url):
+            if cookie.get("name") == "_csrf_token":
+                return {"X-CSRF-Token": unquote(cookie.get("value") or "")}
+        return {}
 
     def __exit__(self, exc_type, exc, tb) -> None:
         if self.context is not None:
