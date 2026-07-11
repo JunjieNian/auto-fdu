@@ -20,6 +20,7 @@
         <button class="nav-item" data-view="announcements"><span>◉</span>公告</button>
         <button class="nav-item" data-view="materials"><span>▤</span>课件</button>
         <button class="nav-item" data-view="courses"><span>▦</span>课程</button>
+        <button class="nav-item" data-view="agent"><span>✦</span>Agent 工作台</button>
       </nav>
       <div class="sidebar-foot">
         <div class="privacy-dot"></div>
@@ -84,6 +85,24 @@
       </section>
 
       <section id="courses" class="view"><div id="course-grid" class="course-grid"></div></section>
+
+      <section id="agent" class="view">
+        <div class="agent-safety">
+          <div class="lock-mark">⌾</div>
+          <div><strong>人工审查门禁已开启</strong><p>Agent 只能生成本地草稿。当前提交总开关关闭，任何操作都不会上传到 eLearning。</p></div>
+          <span id="submission-lock-badge" class="badge done">提交已锁定</span>
+        </div>
+        <div class="agent-layout">
+          <section class="panel agent-panel">
+            <div class="panel-heading"><div><p class="eyebrow">ASSIGNMENT QUEUE</p><h3>可处理作业</h3></div><span class="muted-note">仅显示未提交项目</span></div>
+            <div id="agent-assignment-list" class="agent-assignment-list"></div>
+          </section>
+          <section class="panel agent-panel">
+            <div class="panel-heading"><div><p class="eyebrow">DRAFT HISTORY</p><h3>草稿与审批记录</h3></div><span id="agent-runtime" class="badge">检查中</span></div>
+            <div id="agent-job-list" class="agent-job-list"></div>
+          </section>
+        </div>
+      </section>
     </main>
   </div>
 
@@ -100,6 +119,32 @@
       </form>
       <p id="login-error" class="form-error hidden"></p>
       <div class="security-note"><span>●</span> 密码只保存在当前应用进程内</div>
+    </div>
+  </div>
+
+  <div id="review-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="review-title">
+    <div class="review-card">
+      <div class="review-header">
+        <div><p class="eyebrow">HUMAN REVIEW</p><h2 id="review-title">审查 Agent 草稿</h2></div>
+        <button id="review-close" class="icon-button" aria-label="关闭">×</button>
+      </div>
+      <div id="review-status" class="review-status"></div>
+      <label class="review-label">可编辑草稿<textarea id="review-draft" rows="16" spellcheck="false"></textarea></label>
+      <div id="artifact-list" class="artifact-list"></div>
+      <div class="review-actions"><button id="save-draft-button" class="secondary-button">保存修改</button></div>
+      <div class="approval-box">
+        <h3>批准准备提交</h3>
+        <p>批准不会立即提交。请输入完整作业标题，批准令牌十分钟后失效。</p>
+        <label class="check-row"><input id="reviewed-check" type="checkbox"> 我已阅读并核对草稿及所有选中的文件</label>
+        <label class="review-label">提交形式<select id="submission-type"></select></label>
+        <label class="review-label">审查备注<textarea id="review-notes" rows="2" placeholder="可选：记录修改或检查结果"></textarea></label>
+        <label class="review-label">输入作业标题确认<input id="approval-confirmation" autocomplete="off"></label>
+        <div class="review-actions">
+          <button id="approve-button" class="primary-button">保存审查批准</button>
+          <button id="final-submit-button" class="danger-button" disabled>最终提交（锁定）</button>
+        </div>
+        <p id="approval-message" class="approval-message"></p>
+      </div>
     </div>
   </div>
   <script src="{{ url_for('static', filename='app.js') }}"></script>

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import mimetypes
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlparse
 
@@ -52,6 +54,12 @@ class CanvasClient:
             [("include[]", "submission"), ("order_by", "due_at")],
         )
 
+    def assignment(self, course_id: int, assignment_id: int) -> dict[str, Any]:
+        return self.get_json(
+            f"/api/v1/courses/{course_id}/assignments/{assignment_id}",
+            [("include[]", "submission")],
+        )
+
     def announcements(self, course_id: int) -> list[dict[str, Any]]:
         return self.get_all(
             f"/api/v1/courses/{course_id}/discussion_topics",
@@ -75,6 +83,62 @@ class CanvasClient:
                 ("end_date", (now + timedelta(days=days_forward)).isoformat()),
             ],
         )
+
+    def upload_submission_file(
+        self, course_id: int, assignment_id: int, path: Path
+    ) -> dict[str, Any]:
+        """Upload a reviewed file to Canvas without submitting the assignment."""
+        first = self.session.request.post(
+            f"{self.base_url}/api/v1/courses/{course_id}/assignments/{assignment_id}/submissions/self/files",
+            form={
+                "name": path.name,
+                "size": str(path.stat().st_size),
+                "content_type": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+            },
+            headers=self.session.csrf_headers(),
+            timeout=60_000,
+        )
+        if not first.ok:
+            raise CanvasApiError(f"Preparing upload failed with HTTP {first.status}")
+        upload = first.json()
+        multipart: dict[str, Any] = dict(upload.get("upload_params") or {})
+        multipart["file"] = {
+            "name": path.name,
+            "mimeType": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+            "buffer": path.read_bytes(),
+        }
+        second = self.session.request.post(
+            upload["upload_url"], multipart=multipart, timeout=120_000
+        )
+        if not second.ok:
+            raise CanvasApiError(f"Uploading {path.name} failed with HTTP {second.status}")
+        return second.json()
+
+    def submit_assignment(
+        self,
+        course_id: int,
+        assignment_id: int,
+        submission_type: str,
+        *,
+        body: str | None = None,
+        file_ids: list[int] | None = None,
+    ) -> dict[str, Any]:
+        form: list[tuple[str, str]] = [("submission[submission_type]", submission_type)]
+        if submission_type == "online_text_entry":
+            form.append(("submission[body]", body or ""))
+        elif submission_type == "online_upload":
+            form.extend(("submission[file_ids][]", str(file_id)) for file_id in (file_ids or []))
+        else:
+            raise CanvasApiError(f"Unsupported submission type: {submission_type}")
+        response = self.session.request.post(
+            f"{self.base_url}/api/v1/courses/{course_id}/assignments/{assignment_id}/submissions",
+            data=urlencode(form),
+            headers={"Content-Type": "application/x-www-form-urlencoded", **self.session.csrf_headers()},
+            timeout=60_000,
+        )
+        if not response.ok:
+            raise CanvasApiError(f"Submitting assignment failed with HTTP {response.status}")
+        return response.json()
 
 
 def _next_link(link_header: str) -> str | None:
