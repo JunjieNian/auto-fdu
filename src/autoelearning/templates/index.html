@@ -53,7 +53,7 @@
         </div>
         <div class="stats-grid">
           <article class="stat-card accent-red"><span class="stat-icon">✓</span><div><strong id="stat-assignments">—</strong><span>全部作业</span></div></article>
-          <article class="stat-card accent-blue"><span class="stat-icon">◷</span><div><strong id="stat-pending">—</strong><span>待提交</span></div></article>
+          <article class="stat-card accent-blue"><span class="stat-icon">◷</span><div><strong id="stat-pending">—</strong><span>Agent 可处理</span></div></article>
           <article class="stat-card accent-gold"><span class="stat-icon">◉</span><div><strong id="stat-announcements">—</strong><span>课程公告</span></div></article>
           <article class="stat-card accent-teal"><span class="stat-icon">▤</span><div><strong id="stat-materials">—</strong><span>课件文件</span></div></article>
         </div>
@@ -70,7 +70,7 @@
       </section>
 
       <section id="assignments" class="view">
-        <div class="toolbar"><div class="search-wrap"><span>⌕</span><input id="assignment-search" placeholder="搜索作业或课程"></div><div class="segmented"><button class="active" data-filter="all">全部</button><button data-filter="pending">待提交</button><button data-filter="done">已完成</button></div></div>
+        <div class="toolbar"><div class="search-wrap"><span>⌕</span><input id="assignment-search" placeholder="搜索作业或课程"></div><div class="segmented"><button class="active" data-filter="all">全部</button><button data-filter="pending">eLearning 未完成</button><button data-filter="done">已完成</button></div></div>
         <div id="assignment-table" class="data-panel"></div>
       </section>
 
@@ -94,7 +94,7 @@
         </div>
         <div class="agent-layout">
           <section class="panel agent-panel">
-            <div class="panel-heading"><div><p class="eyebrow">ASSIGNMENT QUEUE</p><h3>可处理作业</h3></div><span class="muted-note">仅显示未提交项目</span></div>
+            <div class="panel-heading"><div><p class="eyebrow">ASSIGNMENT GATE</p><h3>自动门控与草稿队列</h3><p class="muted-note">仅为新出现、支持线上提交且题面完整的作业自动生成；其他项目会显示忽略原因。</p></div></div>
             <div id="agent-assignment-list" class="agent-assignment-list"></div>
           </section>
           <section class="panel agent-panel">

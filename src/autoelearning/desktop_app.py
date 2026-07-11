@@ -15,6 +15,7 @@ from urllib.request import urlopen
 from flask import Flask, jsonify, render_template, request, send_file
 
 from .agent_workflow import CodexDraftAgent
+from .assignment_gate import ELIGIBLE, evaluate_assignment
 from .auth import AuthenticationError, ElearningSession
 from .canvas import CanvasClient
 from .config import Settings, load_settings
@@ -40,6 +41,7 @@ class RuntimeState:
         self.user: dict[str, Any] | None = None
         self.syncing = False
         self.agent_busy = False
+        self.agent_queue: list[int] = []
         self.lock = threading.Lock()
 
 
@@ -95,33 +97,42 @@ def session_status():
 
 @app.post("/api/sync")
 def sync():
-    if state.syncing:
-        return _error("同步正在进行中，请稍候。", 409)
-    local_settings = replace(settings, username=state.username, password=state.password)
     with state.lock:
+        if state.syncing:
+            return _error("同步正在进行中，请稍候。", 409)
         state.syncing = True
-        try:
-            with Store(local_settings.database_path) as store:
-                run_id = store.start_run()
-                try:
-                    with ElearningSession(local_settings) as session:
-                        client = CanvasClient(session)
-                        user = client.get_json("/api/v1/users/self")
-                        summary, errors = sync_all(client, store)
-                    state.user = user
-                    result = {**summary.__dict__, "errors": errors}
-                    store.finish_run(run_id, "partial" if errors else "success", result)
-                    return jsonify({"ok": not errors, **result})
-                except Exception as exc:
-                    store.finish_run(run_id, "failed", {"error": str(exc)})
-                    raise
-        except AuthenticationError as exc:
-            state.user = None
-            return _error(str(exc), 401)
-        except Exception as exc:
-            app.logger.exception("Sync failed")
-            return _error(f"同步失败：{exc}", 500)
-        finally:
+    local_settings = replace(settings, username=state.username, password=state.password)
+    try:
+        with Store(local_settings.database_path) as store:
+            existing_ids = store.assignment_ids()
+            run_id = store.start_run()
+            try:
+                with ElearningSession(local_settings) as session:
+                    client = CanvasClient(session)
+                    user = client.get_json("/api/v1/users/self")
+                    summary, errors = sync_all(client, store)
+                state.user = user
+                new_ids = store.assignment_ids() - existing_ids
+                gate_summary, auto_job_ids = _apply_assignment_gate(store, new_ids)
+                result = {
+                    **summary.__dict__, "errors": errors, "gate": gate_summary,
+                    "auto_draft_job_ids": auto_job_ids,
+                }
+                store.finish_run(run_id, "partial" if errors else "success", result)
+            except Exception as exc:
+                store.finish_run(run_id, "failed", {"error": str(exc)})
+                raise
+        if auto_job_ids:
+            _enqueue_agent_jobs(auto_job_ids)
+        return jsonify({"ok": not errors, **result})
+    except AuthenticationError as exc:
+        state.user = None
+        return _error(str(exc), 401)
+    except Exception as exc:
+        app.logger.exception("Sync failed")
+        return _error(f"同步失败：{exc}", 500)
+    finally:
+        with state.lock:
             state.syncing = False
 
 
@@ -134,8 +145,6 @@ def create_agent_job():
         return _error("请选择一个有效作业。", 400)
     if not shutil.which("codex"):
         return _error("当前系统找不到 Codex CLI。", 503)
-    if state.agent_busy:
-        return _error("已有 Agent 正在生成草稿，请等待它完成。", 409)
     with Store(settings.database_path) as store:
         assignment = store.get_assignment(assignment_id)
         if not assignment:
@@ -144,21 +153,18 @@ def create_agent_job():
         test_mode = data.get("test_mode") is True
         if completed and not test_mode:
             return _error("该作业已经提交或评分；如需验证，请使用永久不可提交的测试模式。", 409)
+        if not completed:
+            decision = evaluate_assignment(assignment)
+            store.update_assignment_gate(
+                assignment_id, status=decision.status, reason=decision.reason,
+                evidence=list(decision.evidence), fingerprint=decision.fingerprint,
+            )
+            if decision.status != ELIGIBLE:
+                return _error(f"自动门控已忽略此作业：{decision.reason}", 409)
         job_id = store.create_agent_job(
             assignment_id, int(assignment["course_id"]), test_mode=completed or test_mode
         )
-    state.agent_busy = True
-    username, password = state.username, state.password
-
-    def worker() -> None:
-        try:
-            CodexDraftAgent(settings).run_job(job_id, username, password)
-        except Exception:
-            app.logger.exception("Agent job %s failed", job_id)
-        finally:
-            state.agent_busy = False
-
-    threading.Thread(target=worker, name=f"draft-agent-{job_id}", daemon=True).start()
+    _enqueue_agent_jobs([job_id])
     return jsonify({"ok": True, "job_id": job_id, "status": "queued"}), 202
 
 
@@ -249,6 +255,67 @@ def download_agent_artifact(job_id: int, artifact_path: str):
     return send_file(path, as_attachment=True, download_name=path.name)
 
 
+def _apply_assignment_gate(
+    store: Store, new_assignment_ids: set[int],
+) -> tuple[dict[str, int], list[int]]:
+    summary = {"eligible": 0, "ignored": 0, "needs_context": 0, "new": len(new_assignment_ids)}
+    auto_job_ids: list[int] = []
+    codex_ready = shutil.which("codex") is not None
+    for assignment in store.assignments_for_gate():
+        decision = evaluate_assignment(assignment)
+        store.update_assignment_gate(
+            int(assignment["id"]), status=decision.status, reason=decision.reason,
+            evidence=list(decision.evidence), fingerprint=decision.fingerprint,
+        )
+        if decision.status == ELIGIBLE:
+            summary["eligible"] += 1
+        elif decision.status == "needs_context":
+            summary["needs_context"] += 1
+        else:
+            summary["ignored"] += 1
+        if (
+            int(assignment["id"]) in new_assignment_ids
+            and decision.status == ELIGIBLE
+            and settings.agent_auto_draft_enabled
+            and codex_ready
+            and not store.has_agent_job(int(assignment["id"]))
+        ):
+            auto_job_ids.append(store.create_agent_job(
+                int(assignment["id"]), int(assignment["course_id"])
+            ))
+    summary["auto_queued"] = len(auto_job_ids)
+    return summary, auto_job_ids
+
+
+def _enqueue_agent_jobs(job_ids: list[int]) -> None:
+    if not job_ids:
+        return
+    should_start = False
+    with state.lock:
+        known = set(state.agent_queue)
+        state.agent_queue.extend(job_id for job_id in job_ids if job_id not in known)
+        if not state.agent_busy:
+            state.agent_busy = True
+            should_start = True
+    if should_start:
+        threading.Thread(
+            target=_agent_queue_worker, name="draft-agent-queue", daemon=True
+        ).start()
+
+
+def _agent_queue_worker() -> None:
+    while True:
+        with state.lock:
+            if not state.agent_queue:
+                state.agent_busy = False
+                return
+            job_id = state.agent_queue.pop(0)
+        try:
+            CodexDraftAgent(settings).run_job(job_id, state.username, state.password)
+        except Exception:
+            app.logger.exception("Agent job %s failed", job_id)
+
+
 @app.get("/api/dashboard")
 def dashboard():
     db = settings.database_path
@@ -265,6 +332,7 @@ def dashboard():
         assignments = _rows(
             connection,
             """SELECT a.id,a.course_id,a.name,a.due_at,a.html_url,a.submission_state,
+            a.gate_status,a.gate_reason,a.gate_evidence_json,a.gate_evaluated_at,
             c.name AS course_name,c.course_code FROM assignments a
             JOIN courses c ON c.id=a.course_id ORDER BY CASE WHEN a.due_at IS NULL THEN 1 ELSE 0 END,
             datetime(a.due_at) DESC""",
@@ -301,8 +369,10 @@ def dashboard():
                 "agent_jobs": agent_jobs,
                 "agent": {
                     "busy": state.agent_busy,
+                    "queue_size": len(state.agent_queue),
                     "codex_available": shutil.which("codex") is not None,
                     "submission_enabled": settings.submission_enabled,
+                    "auto_draft_enabled": settings.agent_auto_draft_enabled,
                 },
             }
         )
@@ -323,7 +393,12 @@ def _empty_dashboard() -> dict[str, Any]:
         "counts": {"courses": 0, "assignments": 0, "announcements": 0, "materials": 0},
         "courses": [], "assignments": [], "announcements": [], "materials": [], "last_run": None,
         "agent_jobs": [],
-        "agent": {"busy": False, "codex_available": shutil.which("codex") is not None, "submission_enabled": settings.submission_enabled},
+        "agent": {
+            "busy": False, "queue_size": 0,
+            "codex_available": shutil.which("codex") is not None,
+            "submission_enabled": settings.submission_enabled,
+            "auto_draft_enabled": settings.agent_auto_draft_enabled,
+        },
     }
 
 
@@ -370,15 +445,19 @@ def main() -> None:
         webbrowser.open(APP_URL)
         return
     settings.data_dir.mkdir(parents=True, exist_ok=True)
+    queued_job_ids: list[int] = []
     with Store(settings.database_path) as store:
         store.connection.execute(
             """UPDATE agent_jobs SET status='failed', error='应用重启中断了 Agent 任务', updated_at=?
-            WHERE status IN ('queued','preparing','running','submitting')""",
+            WHERE status IN ('preparing','running','submitting')""",
             (datetime.now(timezone.utc).isoformat(),),
         )
         store.connection.commit()
+        _apply_assignment_gate(store, set())
+        queued_job_ids = store.queued_agent_job_ids()
     log_path = settings.data_dir / "desktop-app.log"
     logging.basicConfig(filename=log_path, level=logging.INFO, encoding="utf-8")
+    _enqueue_agent_jobs(queued_job_ids)
     threading.Timer(1.2, lambda: webbrowser.open(APP_URL)).start()
     app.run(host=HOST, port=PORT, debug=False, use_reloader=False, threaded=True)
 

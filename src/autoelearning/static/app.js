@@ -109,7 +109,9 @@ async function sync() {
   try {
     const data = await api("/api/sync", { method: "POST", body: "{}" });
     await loadDashboard();
-    banner(`同步完成：${data.assignments} 条作业，${data.announcements} 条公告，${data.materials} 项课件。`);
+    const gate = data.gate || {};
+    const queued = gate.auto_queued ? `，已自动排队 ${gate.auto_queued} 个新作业` : "";
+    banner(`同步完成：${data.assignments} 条作业；门控判定 ${gate.eligible || 0} 个可处理、${gate.ignored || 0} 个忽略、${gate.needs_context || 0} 个缺题面${queued}。`);
   } catch (err) {
     banner(err.message, true);
     if (/登录|认证|会话/.test(err.message)) showLogin(true);
@@ -147,7 +149,7 @@ function renderAll() {
   if (!state.data) return;
   const data = state.data;
   $("#stat-assignments").textContent = data.counts.assignments;
-  $("#stat-pending").textContent = data.assignments.filter(isPending).length;
+  $("#stat-pending").textContent = data.assignments.filter((item) => item.gate_status === "eligible" && isPending(item)).length;
   $("#stat-announcements").textContent = data.counts.announcements;
   $("#stat-materials").textContent = data.counts.materials;
   renderOverview();
@@ -167,7 +169,8 @@ function renderOverview() {
   $("#recent-assignments").classList.remove("loading-list");
   $("#recent-assignments").innerHTML = assignments.length ? assignments.map((item) => {
     const date = shortDate(item.due_at);
-    return `<div class="list-item"><div class="date-block"><strong>${date.day}</strong><span>${date.month}</span></div><div class="item-copy"><strong>${esc(item.name)}</strong><span>${esc(item.course_code || item.course_name)}</span></div><span class="badge ${isDone(item) ? "done" : "pending"}">${isDone(item) ? "已完成" : "待提交"}</span></div>`;
+    const gate = assignmentGate(item);
+    return `<div class="list-item"><div class="date-block"><strong>${date.day}</strong><span>${date.month}</span></div><div class="item-copy"><strong>${esc(item.name)}</strong><span>${esc(item.course_code || item.course_name)}</span></div><span class="badge ${gate.className}">${esc(gate.label)}</span></div>`;
   }).join("") : '<div class="empty">暂无作业数据</div>';
   const announcements = data.announcements.slice(0, 5);
   $("#recent-announcements").classList.remove("loading-list");
@@ -183,7 +186,7 @@ function renderAssignments() {
   let rows = state.data.assignments.filter((item) => `${item.name} ${item.course_name}`.toLowerCase().includes(query));
   if (state.assignmentFilter === "pending") rows = rows.filter(isPending);
   if (state.assignmentFilter === "done") rows = rows.filter(isDone);
-  $("#assignment-table").innerHTML = '<div class="table-row header"><span>作业</span><span>课程</span><span>截止时间</span><span>状态</span></div>' + (rows.length ? rows.map((item) => `<div class="table-row"><div><a class="row-link row-title" href="${esc(item.html_url || "#")}" target="_blank">${esc(item.name)}</a><div class="row-sub">作业编号 ${item.id}</div></div><div>${esc(item.course_code || item.course_name)}</div><div>${fmtDate(item.due_at)}</div><div><span class="badge ${isDone(item) ? "done" : "pending"}">${isDone(item) ? (item.submission_state === "graded" ? "已评分" : "已提交") : "待提交"}</span></div></div>`).join("") : '<div class="empty">没有符合条件的作业</div>');
+  $("#assignment-table").innerHTML = '<div class="table-row header"><span>作业</span><span>课程</span><span>截止时间</span><span>Agent 门控</span></div>' + (rows.length ? rows.map((item) => { const gate = assignmentGate(item); return `<div class="table-row"><div><a class="row-link row-title" href="${esc(item.html_url || "#")}" target="_blank">${esc(item.name)}</a><div class="row-sub">${esc(item.gate_reason || `作业编号 ${item.id}`)}</div></div><div>${esc(item.course_code || item.course_name)}</div><div>${fmtDate(item.due_at)}</div><div><span class="badge ${gate.className}">${esc(gate.label)}</span></div></div>`; }).join("") : '<div class="empty">没有符合条件的作业</div>');
 }
 
 function renderAnnouncements() {
@@ -211,16 +214,28 @@ function renderAgent() {
   const locked = !capabilities.submission_enabled;
   $("#submission-lock-badge").textContent = locked ? "提交已锁定" : "提交已启用";
   $("#submission-lock-badge").className = `badge ${locked ? "done" : "pending"}`;
-  $("#agent-runtime").textContent = capabilities.codex_available ? (capabilities.busy ? "Agent 运行中" : "Codex 已就绪") : "Codex 不可用";
-  const assignments = [...state.data.assignments].sort((a, b) => Number(isDone(a)) - Number(isDone(b)));
+  const queueText = capabilities.queue_size ? ` · 排队 ${capabilities.queue_size}` : "";
+  $("#agent-runtime").textContent = capabilities.codex_available ? (capabilities.busy ? `Agent 运行中${queueText}` : "Codex 已就绪") : "Codex 不可用";
+  const assignments = [...state.data.assignments].sort((a, b) => Number(b.gate_status === "eligible") - Number(a.gate_status === "eligible") || Number(isDone(a)) - Number(isDone(b)));
   $("#agent-assignment-list").innerHTML = assignments.length ? assignments.map((item) => {
     const completed = isDone(item);
-    return `<div class="agent-assignment"><div><h4>${esc(item.name)}</h4><p>${esc(item.course_code || item.course_name)} · ${fmtDate(item.due_at)}${completed ? " · 已完成测试模式" : ""}</p></div><button class="small-button" data-create-draft="${item.id}" data-test-mode="${completed}" ${(!capabilities.codex_available || capabilities.busy) ? "disabled" : ""}>${completed ? "测试生成（不可提交）" : "生成审查草稿"}</button></div>`;
+    const eligible = item.gate_status === "eligible";
+    const action = completed ? "测试生成（不可提交）" : (eligible ? "生成审查草稿" : "已自动忽略");
+    const disabled = !capabilities.codex_available || (!completed && !eligible);
+    return `<div class="agent-assignment"><div><h4>${esc(item.name)}</h4><p>${esc(item.course_code || item.course_name)} · ${fmtDate(item.due_at)} · ${esc(completed ? "已完成测试模式" : (item.gate_reason || "等待门控"))}</p></div><button class="small-button" data-create-draft="${item.id}" data-test-mode="${completed}" ${disabled ? "disabled" : ""}>${action}</button></div>`;
   }).join("") : '<div class="empty">没有作业数据</div>';
   $$('[data-create-draft]').forEach((button) => { button.onclick = () => createDraft(Number(button.dataset.createDraft), button.dataset.testMode === "true"); });
   const jobs = state.data.agent_jobs || [];
   $("#agent-job-list").innerHTML = jobs.length ? jobs.map((job) => `<div class="agent-job"><div class="job-top"><div><h4>${esc(job.assignment_name)}</h4><p>${esc(job.course_code || job.course_name)}${job.test_mode ? " · 永久不可提交" : ""}</p></div><span class="job-status ${esc(job.status)}">${esc(jobStatusText(job.status))}</span></div><div class="job-meta"><span>${fmtDate(job.updated_at)}</span>${["draft_ready", "approved", "failed", "submit_failed"].includes(job.status) ? `<button class="small-button" data-review-job="${job.id}">查看与审查</button>` : ""}</div>${job.error ? `<p class="form-error">${esc(job.error)}</p>` : ""}</div>`).join("") : '<div class="empty">还没有 Agent 草稿</div>';
   $$('[data-review-job]').forEach((button) => { button.onclick = () => openReview(Number(button.dataset.reviewJob)); });
+}
+
+function assignmentGate(item) {
+  if (isDone(item)) return { label: item.submission_state === "graded" ? "已评分" : "已提交", className: "done" };
+  if (item.gate_status === "eligible") return { label: "Agent 可处理", className: "pending" };
+  if (item.gate_status === "needs_context") return { label: "缺少题面", className: "done" };
+  if (!item.gate_status || item.gate_status === "pending") return { label: "等待门控", className: "pending" };
+  return { label: "自动忽略", className: "done" };
 }
 
 function jobStatusText(status) {

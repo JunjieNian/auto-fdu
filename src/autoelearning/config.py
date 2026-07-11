@@ -27,6 +27,7 @@ class Settings:
     agent_timeout_seconds: int
     agent_material_limit: int
     agent_max_file_mb: int
+    agent_auto_draft_enabled: bool
 
     @property
     def profile_dir(self) -> Path:
@@ -64,6 +65,9 @@ def load_settings() -> Settings:
         agent_timeout_seconds=int(os.getenv("ELEARNING_AGENT_TIMEOUT_SECONDS", "1800")),
         agent_material_limit=int(os.getenv("ELEARNING_AGENT_MATERIAL_LIMIT", "6")),
         agent_max_file_mb=int(os.getenv("ELEARNING_AGENT_MAX_FILE_MB", "25")),
+        agent_auto_draft_enabled=_as_bool(
+            os.getenv("ELEARNING_AGENT_AUTO_DRAFT_ENABLED"), True
+        ),
     )
 
 

@@ -17,7 +17,9 @@ CREATE TABLE IF NOT EXISTS courses (
 CREATE TABLE IF NOT EXISTS assignments (
   id INTEGER PRIMARY KEY, course_id INTEGER NOT NULL, name TEXT NOT NULL,
   due_at TEXT, html_url TEXT, submission_state TEXT, raw_json TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL, first_seen_at TEXT,
+  gate_status TEXT NOT NULL DEFAULT 'pending', gate_reason TEXT,
+  gate_evidence_json TEXT, gate_fingerprint TEXT, gate_evaluated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS announcements (
   id INTEGER PRIMARY KEY, course_id INTEGER NOT NULL, title TEXT NOT NULL,
@@ -77,6 +79,24 @@ class Store(AbstractContextManager["Store"]):
                 "ALTER TABLE agent_jobs ADD COLUMN test_mode INTEGER NOT NULL DEFAULT 0"
             )
             self.connection.commit()
+        assignment_columns = {
+            row["name"] for row in self.connection.execute("PRAGMA table_info(assignments)")
+        }
+        migrations = {
+            "first_seen_at": "TEXT",
+            "gate_status": "TEXT NOT NULL DEFAULT 'pending'",
+            "gate_reason": "TEXT",
+            "gate_evidence_json": "TEXT",
+            "gate_fingerprint": "TEXT",
+            "gate_evaluated_at": "TEXT",
+        }
+        for name, definition in migrations.items():
+            if name not in assignment_columns:
+                self.connection.execute(f"ALTER TABLE assignments ADD COLUMN {name} {definition}")
+        self.connection.execute(
+            "UPDATE assignments SET first_seen_at=COALESCE(first_seen_at,updated_at)"
+        )
+        self.connection.commit()
 
     def upsert_courses(self, rows: Iterable[dict[str, Any]]) -> None:
         now = _now()
@@ -93,11 +113,18 @@ class Store(AbstractContextManager["Store"]):
         values = []
         for row in rows:
             submission = row.get("submission") or {}
-            values.append((row["id"], course_id, row.get("name") or str(row["id"]), row.get("due_at"), row.get("html_url"), submission.get("workflow_state"), _json(row), now))
+            values.append((row["id"], course_id, row.get("name") or str(row["id"]), row.get("due_at"), row.get("html_url"), submission.get("workflow_state"), _json(row), now, now))
         self.connection.executemany(
-            """INSERT INTO assignments VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO assignments(
+            id,course_id,name,due_at,html_url,submission_state,raw_json,updated_at,first_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET name=excluded.name, due_at=excluded.due_at,
             html_url=excluded.html_url, submission_state=excluded.submission_state,
+            gate_status=CASE WHEN assignments.raw_json<>excluded.raw_json THEN 'pending' ELSE assignments.gate_status END,
+            gate_reason=CASE WHEN assignments.raw_json<>excluded.raw_json THEN NULL ELSE assignments.gate_reason END,
+            gate_evidence_json=CASE WHEN assignments.raw_json<>excluded.raw_json THEN NULL ELSE assignments.gate_evidence_json END,
+            gate_fingerprint=CASE WHEN assignments.raw_json<>excluded.raw_json THEN NULL ELSE assignments.gate_fingerprint END,
+            gate_evaluated_at=CASE WHEN assignments.raw_json<>excluded.raw_json THEN NULL ELSE assignments.gate_evaluated_at END,
             raw_json=excluded.raw_json, updated_at=excluded.updated_at""", values,
         )
         self.connection.commit()
@@ -155,6 +182,40 @@ class Store(AbstractContextManager["Store"]):
             (assignment_id,),
         ).fetchone()
         return dict(row) if row else None
+
+    def assignment_ids(self) -> set[int]:
+        return {int(row[0]) for row in self.connection.execute("SELECT id FROM assignments")}
+
+    def assignments_for_gate(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """SELECT a.*,c.name AS course_name,c.course_code FROM assignments a
+            JOIN courses c ON c.id=a.course_id ORDER BY a.id"""
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_assignment_gate(
+        self, assignment_id: int, *, status: str, reason: str,
+        evidence: list[str], fingerprint: str,
+    ) -> None:
+        self.connection.execute(
+            """UPDATE assignments SET gate_status=?,gate_reason=?,gate_evidence_json=?,
+            gate_fingerprint=?,gate_evaluated_at=? WHERE id=?""",
+            (status, reason, _json(evidence), fingerprint, _now(), assignment_id),
+        )
+        self.connection.commit()
+
+    def has_agent_job(self, assignment_id: int) -> bool:
+        row = self.connection.execute(
+            "SELECT 1 FROM agent_jobs WHERE assignment_id=? LIMIT 1", (assignment_id,)
+        ).fetchone()
+        return row is not None
+
+    def queued_agent_job_ids(self) -> list[int]:
+        return [
+            int(row[0]) for row in self.connection.execute(
+                "SELECT id FROM agent_jobs WHERE status='queued' ORDER BY id"
+            ).fetchall()
+        ]
 
     def relevant_materials(self, course_id: int) -> list[dict[str, Any]]:
         rows = self.connection.execute(
