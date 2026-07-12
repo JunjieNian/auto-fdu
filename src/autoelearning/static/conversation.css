@@ -1,0 +1,11 @@
+.agent-conversation{border:1px solid #dfe3e9;border-radius:12px;padding:16px;margin-top:16px;background:#f8fafc}
+.conversation-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.conversation-heading h3{font-family:Georgia,"Microsoft YaHei",serif;font-size:15px;margin:3px 0 0}
+.conversation-heading .eyebrow{margin:0}
+.conversation-heading>span{font-size:10px;color:#68758a}
+.agent-message-list{display:grid;gap:8px;margin:14px 0}
+.agent-message{max-width:88%;border-radius:10px;padding:10px 12px;font-size:11px;line-height:1.55;white-space:pre-wrap}
+.agent-message.user{margin-left:auto;background:#315e93;color:#fff}
+.agent-message.assistant{background:#fff;border:1px solid #e1e5eb;color:#25324a}
+.agent-message-meta{display:block;font-size:9px;opacity:.7;margin-bottom:4px}
+@media(max-width:760px){.conversation-heading{flex-direction:column}.agent-message{max-width:96%}}

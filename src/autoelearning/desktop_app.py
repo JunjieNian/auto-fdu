@@ -41,7 +41,7 @@ class RuntimeState:
         self.user: dict[str, Any] | None = None
         self.syncing = False
         self.agent_busy = False
-        self.agent_queue: list[int] = []
+        self.agent_queue: list[tuple[int, str]] = []
         self.lock = threading.Lock()
 
 
@@ -172,6 +172,7 @@ def create_agent_job():
 def agent_job_detail(job_id: int):
     with Store(settings.database_path) as store:
         job = store.get_agent_job(job_id)
+        messages = store.list_agent_messages(job_id) if job else []
     if not job:
         return _error("草稿任务不存在。", 404)
     public = _public_job(job, include_detail=True)
@@ -183,7 +184,36 @@ def agent_job_detail(job_id: int):
             public["draft"] = ""
     else:
         public["draft"] = ""
+    public["messages"] = messages
     return jsonify(public)
+
+
+@app.post("/api/agent/jobs/<int:job_id>/messages")
+def continue_agent_job(job_id: int):
+    data = request.get_json(silent=True) or {}
+    content = str(data.get("content") or "").strip()
+    if not content:
+        return _error("请输入希望 Agent 修改的内容。", 400)
+    if len(content) > 4000:
+        return _error("单条修改要求不能超过 4000 个字符。", 400)
+    if not shutil.which("codex"):
+        return _error("当前系统找不到 Codex CLI。", 503)
+    with Store(settings.database_path) as store:
+        job = store.get_agent_job(job_id)
+        if not job:
+            return _error("草稿任务不存在。", 404)
+        if job["status"] not in {"draft_ready", "approved", "failed"}:
+            return _error("Agent 正在处理上一轮修改，请等待完成。", 409)
+        if not job.get("workspace") or not Path(job["workspace"]).is_dir():
+            return _error("原始 Agent 工作区不存在，无法继续对话。", 409)
+        store.add_agent_message(job_id, "user", content)
+        store.update_agent_job(
+            job_id, status="queued_revision", pending_action="revision", error=None,
+            approved_artifacts_json=None, submission_type=None, approved_at=None,
+            approval_token=None, approval_expires_at=None,
+        )
+    _enqueue_agent_tasks([(job_id, "revision")])
+    return jsonify({"ok": True, "job_id": job_id, "status": "queued_revision"}), 202
 
 
 @app.patch("/api/agent/jobs/<int:job_id>/draft")
@@ -291,12 +321,16 @@ def _apply_assignment_gate(
 
 
 def _enqueue_agent_jobs(job_ids: list[int]) -> None:
-    if not job_ids:
+    _enqueue_agent_tasks([(job_id, "draft") for job_id in job_ids])
+
+
+def _enqueue_agent_tasks(tasks: list[tuple[int, str]]) -> None:
+    if not tasks:
         return
     should_start = False
     with state.lock:
         known = set(state.agent_queue)
-        state.agent_queue.extend(job_id for job_id in job_ids if job_id not in known)
+        state.agent_queue.extend(task for task in tasks if task not in known)
         if not state.agent_busy:
             state.agent_busy = True
             should_start = True
@@ -312,9 +346,13 @@ def _agent_queue_worker() -> None:
             if not state.agent_queue:
                 state.agent_busy = False
                 return
-            job_id = state.agent_queue.pop(0)
+            job_id, action = state.agent_queue.pop(0)
         try:
-            CodexDraftAgent(settings).run_job(job_id, state.username, state.password)
+            agent = CodexDraftAgent(settings)
+            if action == "revision":
+                agent.revise_job(job_id)
+            else:
+                agent.run_job(job_id, state.username, state.password)
         except Exception:
             app.logger.exception("Agent job %s failed", job_id)
 
@@ -411,7 +449,7 @@ def _public_job(job: dict[str, Any], include_detail: bool = False) -> dict[str, 
         "approved_artifacts", "submission_type", "review_notes", "approved_at",
         "approval_expires_at", "submitted_at", "error", "codex_exit_code", "created_at",
         "updated_at", "assignment_name", "due_at", "submission_state", "course_name",
-        "course_code", "test_mode",
+        "course_code", "test_mode", "submission_artifact_path", "pending_action",
     }
     result = {key: job.get(key) for key in keys}
     if include_detail:
@@ -448,19 +486,19 @@ def main() -> None:
         webbrowser.open(APP_URL)
         return
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    queued_job_ids: list[int] = []
+    queued_tasks: list[tuple[int, str]] = []
     with Store(settings.database_path) as store:
         store.connection.execute(
             """UPDATE agent_jobs SET status='failed', error='应用重启中断了 Agent 任务', updated_at=?
-            WHERE status IN ('preparing','running','submitting')""",
+            WHERE status IN ('preparing','running','revising','submitting')""",
             (datetime.now(timezone.utc).isoformat(),),
         )
         store.connection.commit()
         _apply_assignment_gate(store, set())
-        queued_job_ids = store.queued_agent_job_ids()
+        queued_tasks = store.queued_agent_tasks()
     log_path = settings.data_dir / "desktop-app.log"
     logging.basicConfig(filename=log_path, level=logging.INFO, encoding="utf-8")
-    _enqueue_agent_jobs(queued_job_ids)
+    _enqueue_agent_tasks(queued_tasks)
     threading.Timer(1.2, lambda: webbrowser.open(APP_URL)).start()
     app.run(host=HOST, port=PORT, debug=False, use_reloader=False, threaded=True)
 

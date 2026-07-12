@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS agent_jobs (
   assignment_id INTEGER NOT NULL,
   course_id INTEGER NOT NULL,
   status TEXT NOT NULL,
+  pending_action TEXT NOT NULL DEFAULT 'draft',
   test_mode INTEGER NOT NULL DEFAULT 0,
   workspace TEXT,
   draft_path TEXT,
@@ -54,10 +55,19 @@ CREATE TABLE IF NOT EXISTS agent_jobs (
   submission_response_json TEXT,
   error TEXT,
   codex_exit_code INTEGER,
+  submission_artifact_path TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_assignment ON agent_jobs(assignment_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS agent_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_messages_job ON agent_messages(job_id,id);
 """
 
 
@@ -79,6 +89,15 @@ class Store(AbstractContextManager["Store"]):
                 "ALTER TABLE agent_jobs ADD COLUMN test_mode INTEGER NOT NULL DEFAULT 0"
             )
             self.connection.commit()
+        if "pending_action" not in columns:
+            self.connection.execute(
+                "ALTER TABLE agent_jobs ADD COLUMN pending_action TEXT NOT NULL DEFAULT 'draft'"
+            )
+        if "submission_artifact_path" not in columns:
+            self.connection.execute(
+                "ALTER TABLE agent_jobs ADD COLUMN submission_artifact_path TEXT"
+            )
+        self.connection.commit()
         assignment_columns = {
             row["name"] for row in self.connection.execute("PRAGMA table_info(assignments)")
         }
@@ -210,10 +229,11 @@ class Store(AbstractContextManager["Store"]):
         ).fetchone()
         return row is not None
 
-    def queued_agent_job_ids(self) -> list[int]:
+    def queued_agent_tasks(self) -> list[tuple[int, str]]:
         return [
-            int(row[0]) for row in self.connection.execute(
-                "SELECT id FROM agent_jobs WHERE status='queued' ORDER BY id"
+            (int(row[0]), str(row[1] or "draft")) for row in self.connection.execute(
+                """SELECT id,pending_action FROM agent_jobs
+                WHERE status IN ('queued','queued_revision') ORDER BY id"""
             ).fetchall()
         ]
 
@@ -228,9 +248,10 @@ class Store(AbstractContextManager["Store"]):
     def create_agent_job(self, assignment_id: int, course_id: int, *, test_mode: bool = False) -> int:
         now = _now()
         cursor = self.connection.execute(
-            """INSERT INTO agent_jobs(assignment_id,course_id,status,test_mode,created_at,updated_at)
-            VALUES (?,?,?,?,?,?)""",
-            (assignment_id, course_id, "queued", int(test_mode), now, now),
+            """INSERT INTO agent_jobs(
+            assignment_id,course_id,status,pending_action,test_mode,created_at,updated_at
+            ) VALUES (?,?,?,?,?,?,?)""",
+            (assignment_id, course_id, "queued", "draft", int(test_mode), now, now),
         )
         self.connection.commit()
         return int(cursor.lastrowid)
@@ -239,6 +260,7 @@ class Store(AbstractContextManager["Store"]):
         allowed = {
             "status", "workspace", "draft_path", "manifest_json", "artifacts_json",
             "approved_artifacts_json",
+            "pending_action", "submission_artifact_path",
             "submission_type", "review_notes", "approved_at", "approval_token",
             "approval_expires_at", "submitted_at", "submission_response_json", "error",
             "codex_exit_code",
@@ -253,6 +275,23 @@ class Store(AbstractContextManager["Store"]):
             f"UPDATE agent_jobs SET {assignments} WHERE id=?", (*values, job_id)
         )
         self.connection.commit()
+
+    def add_agent_message(self, job_id: int, role: str, content: str) -> int:
+        if role not in {"user", "assistant"}:
+            raise ValueError("Unsupported agent message role")
+        cursor = self.connection.execute(
+            "INSERT INTO agent_messages(job_id,role,content,created_at) VALUES (?,?,?,?)",
+            (job_id, role, content, _now()),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def list_agent_messages(self, job_id: int) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT id,role,content,created_at FROM agent_messages WHERE job_id=? ORDER BY id",
+            (job_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_agent_job(self, job_id: int) -> dict[str, Any] | None:
         row = self.connection.execute(

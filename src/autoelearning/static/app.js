@@ -75,6 +75,7 @@ function bindEvents() {
   });
   $("#review-close").onclick = () => showReview(false);
   $("#save-draft-button").onclick = saveReviewedDraft;
+  $("#send-agent-message").onclick = sendAgentMessage;
   $("#approve-button").onclick = approveCurrentJob;
   $("#final-submit-button").onclick = submitCurrentJob;
 }
@@ -229,7 +230,7 @@ function renderAgent() {
   }).join("") : '<div class="empty">没有作业数据</div>';
   $$('[data-create-draft]').forEach((button) => { button.onclick = () => createDraft(Number(button.dataset.createDraft), button.dataset.testMode === "true"); });
   const jobs = state.data.agent_jobs || [];
-  $("#agent-job-list").innerHTML = jobs.length ? jobs.map((job) => `<div class="agent-job"><div class="job-top"><div><h4>${esc(job.assignment_name)}</h4><p>${esc(job.course_code || job.course_name)}${job.test_mode ? " · 永久不可提交" : ""}</p></div><span class="job-status ${esc(job.status)}">${esc(jobStatusText(job.status))}</span></div><div class="job-meta"><span>${fmtDate(job.updated_at)}</span>${["draft_ready", "approved", "failed", "submit_failed"].includes(job.status) ? `<button class="small-button" data-review-job="${job.id}">查看与审查</button>` : ""}</div>${job.error ? `<p class="form-error">${esc(job.error)}</p>` : ""}</div>`).join("") : '<div class="empty">还没有 Agent 草稿</div>';
+  $("#agent-job-list").innerHTML = jobs.length ? jobs.map((job) => `<div class="agent-job"><div class="job-top"><div><h4>${esc(job.assignment_name)}</h4><p>${esc(job.course_code || job.course_name)}${job.test_mode ? " · 永久不可提交" : ""}</p></div><span class="job-status ${esc(job.status)}">${esc(jobStatusText(job.status))}</span></div><div class="job-meta"><span>${fmtDate(job.updated_at)}</span>${["queued_revision", "revising", "draft_ready", "approved", "failed", "submit_failed"].includes(job.status) ? `<button class="small-button" data-review-job="${job.id}">查看与审查</button>` : ""}</div>${job.error ? `<p class="form-error">${esc(job.error)}</p>` : ""}</div>`).join("") : '<div class="empty">还没有 Agent 草稿</div>';
   $$('[data-review-job]').forEach((button) => { button.onclick = () => openReview(Number(button.dataset.reviewJob)); });
 }
 
@@ -243,7 +244,8 @@ function assignmentGate(item) {
 
 function jobStatusText(status) {
   return {
-    queued: "排队中", preparing: "收集资料", running: "生成中", draft_ready: "待审查",
+    queued: "排队中", preparing: "收集资料", running: "生成中", queued_revision: "修改排队中",
+    revising: "修改中", draft_ready: "待审查",
     approved: "已批准", failed: "生成失败", submitting: "提交中", submitted: "已提交",
     submit_failed: "提交失败",
   }[status] || status;
@@ -283,7 +285,7 @@ async function openReview(jobId) {
     $("#review-draft").value = job.draft || "";
     $("#review-draft").disabled = !["draft_ready", "approved"].includes(job.status);
     const artifacts = job.artifacts || [];
-    const reviewPdf = preferredReviewPdf(artifacts);
+    const reviewPdf = preferredReviewPdf(job, artifacts);
     state.reviewArtifactPath = reviewPdf?.path || null;
     $("#artifact-list").innerHTML = artifacts.length ? artifacts.map((item) => {
       const isPdf = item.name.toLowerCase().endsWith(".pdf");
@@ -309,13 +311,18 @@ async function openReview(jobId) {
         }
       };
     });
+    renderAgentMessages(job.messages || []);
+    const canContinue = ["draft_ready", "approved", "failed"].includes(job.status);
+    $("#agent-message-input").disabled = !canContinue;
+    $("#send-agent-message").disabled = !canContinue;
+    $("#send-agent-message").textContent = canContinue ? "发送并重新生成" : "Agent 正在修改…";
     const allowed = (job.submission_types || []).filter((item) => ["online_text_entry", "online_upload"].includes(item));
     $("#submission-type").innerHTML = allowed.map((item) => `<option value="${item}">${item === "online_upload" ? "文件上传" : "文本输入"}</option>`).join("");
     $("#reviewed-check").checked = false;
     $("#approval-confirmation").value = "";
     $("#review-notes").value = job.review_notes || "";
     $("#approval-message").textContent = "";
-    $("#approve-button").disabled = Boolean(job.test_mode);
+    $("#approve-button").disabled = Boolean(job.test_mode) || !["draft_ready", "approved"].includes(job.status);
     $("#approve-button").textContent = job.test_mode ? "测试模式不可批准" : "保存审查批准";
     $("#final-submit-button").disabled = true;
     $("#final-submit-button").textContent = state.data.agent.submission_enabled ? "最终提交" : "最终提交（锁定）";
@@ -324,13 +331,42 @@ async function openReview(jobId) {
   } catch (err) { banner(err.message, true); }
 }
 
-function preferredReviewPdf(artifacts) {
+function preferredReviewPdf(job, artifacts) {
   const pdfs = artifacts.filter((item) => item.name.toLowerCase().endsWith(".pdf"));
-  return pdfs.find((item) => item.name === "reviewed-answer.pdf")
+  return pdfs.find((item) => item.path === job.submission_artifact_path)
+    || pdfs.find((item) => item.name === "reviewed-answer.pdf")
     || pdfs.find((item) => item.name === "submission-ready.pdf")
     || pdfs.find((item) => item.name === "final-answer.pdf")
     || pdfs[0]
     || null;
+}
+
+function renderAgentMessages(messages) {
+  $("#agent-message-list").innerHTML = messages.length ? messages.map((message) => {
+    const label = message.role === "user" ? "你的要求" : "Agent";
+    return `<div class="agent-message ${esc(message.role)}"><span class="agent-message-meta">${label} · ${fmtDate(message.created_at)}</span>${esc(message.content)}</div>`;
+  }).join("") : '<div class="muted-note">初稿已生成。可以在这里继续提出修改要求。</div>';
+}
+
+async function sendAgentMessage() {
+  if (!state.currentJob) return;
+  const input = $("#agent-message-input");
+  const content = input.value.trim();
+  if (!content) {
+    setApprovalMessage("请输入本轮修改要求。", true);
+    return;
+  }
+  try {
+    const result = await api(`/api/agent/jobs/${state.currentJob.id}/messages`, {
+      method: "POST", body: JSON.stringify({ content }),
+    });
+    input.value = "";
+    state.approvalToken = null;
+    $("#final-submit-button").disabled = true;
+    banner("修改要求已加入同一对话，Agent 正在重新生成待提交 PDF。");
+    await openReview(state.currentJob.id);
+    startPolling(result.job_id);
+  } catch (err) { setApprovalMessage(err.message, true); }
 }
 
 function artifactUrl(jobId, path, preview = false) {

@@ -6,6 +6,7 @@
   <meta name="theme-color" content="#17243d">
   <title>eLearning 助手</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='conversation.css') }}">
 </head>
 <body>
   <div class="app-shell">
@@ -139,6 +140,12 @@
       </section>
       <div class="review-files-heading"><strong>本次批准将使用的文件</strong><span>默认只选择上方正在预览的待提交 PDF</span></div>
       <div id="artifact-list" class="artifact-list"></div>
+      <section class="agent-conversation">
+        <div class="conversation-heading"><div><p class="eyebrow">CONTINUE WITH AGENT</p><h3>继续要求 Agent 修改</h3></div><span>每一轮修改都会撤销旧批准并重新生成 PDF</span></div>
+        <div id="agent-message-list" class="agent-message-list"></div>
+        <label class="review-label">本轮修改要求<textarea id="agent-message-input" rows="3" maxlength="4000" placeholder="例如：补充第二题的证明，并将最终文件改名为 homework11-revised.pdf"></textarea></label>
+        <div class="review-actions"><button id="send-agent-message" class="primary-button">发送并重新生成</button></div>
+      </section>
       <details class="source-editor">
         <summary>高级：查看或编辑 Markdown 源稿</summary>
         <label class="review-label">源稿内容<textarea id="review-draft" rows="16" spellcheck="false"></textarea></label>

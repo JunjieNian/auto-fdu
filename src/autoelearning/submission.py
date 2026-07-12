@@ -58,6 +58,12 @@ def approve_job(
     approved_artifacts = _validate_artifacts(job, artifact_paths)
     if submission_type == "online_upload" and not approved_artifacts:
         raise ApprovalError("文件提交至少需要选择一个已审查产物。")
+    expected = job.get("submission_artifact_path")
+    if (
+        submission_type == "online_upload" and expected
+        and expected not in {item.get("path") for item in approved_artifacts}
+    ):
+        raise ApprovalError("必须选择审查台当前显示的待提交 PDF。")
     if submission_type == "online_text_entry" and not job.get("draft_path"):
         raise ApprovalError("文本草稿不存在。")
 
@@ -116,6 +122,7 @@ def update_reviewed_draft(store: Store, job_id: int, content: str) -> dict[str, 
         status="draft_ready",
         draft_path=str(path),
         artifacts_json=artifacts,
+        submission_artifact_path=pdf_relative,
         approval_token=None,
         approval_expires_at=None,
         approved_at=None,
