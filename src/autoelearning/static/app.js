@@ -36,7 +36,10 @@ function banner(message, error = false) {
 }
 
 function showLogin(show = true) { $("#login-modal").classList.toggle("hidden", !show); }
-function showReview(show = true) { $("#review-modal").classList.toggle("hidden", !show); }
+function showReview(show = true) {
+  $("#review-modal").classList.toggle("hidden", !show);
+  if (!show) $("#review-pdf").removeAttribute("src");
+}
 
 async function init() {
   $("#today").textContent = new Intl.DateTimeFormat("zh-CN", {
@@ -280,7 +283,32 @@ async function openReview(jobId) {
     $("#review-draft").value = job.draft || "";
     $("#review-draft").disabled = !["draft_ready", "approved"].includes(job.status);
     const artifacts = job.artifacts || [];
-    $("#artifact-list").innerHTML = artifacts.length ? artifacts.map((item) => `<label class="artifact-row"><input type="checkbox" data-artifact-path="${esc(item.path)}" ${item.name === "agent-last-message.md" ? "" : "checked"}><span>${esc(item.name)} · ${Math.ceil((item.size || 0) / 1024)} KB</span><a href="/api/agent/jobs/${job.id}/artifacts/${esc(encodeURI(item.path))}">下载</a></label>`).join("") : '<p class="muted-note">没有文件产物，将使用文本草稿。</p>';
+    const reviewPdf = preferredReviewPdf(artifacts);
+    state.reviewArtifactPath = reviewPdf?.path || null;
+    $("#artifact-list").innerHTML = artifacts.length ? artifacts.map((item) => {
+      const isPdf = item.name.toLowerCase().endsWith(".pdf");
+      const selected = item.path === state.reviewArtifactPath;
+      return `<div class="artifact-row"><label><input type="checkbox" data-artifact-path="${esc(item.path)}" ${selected ? "checked" : ""}><span>${esc(item.name)} · ${Math.ceil((item.size || 0) / 1024)} KB${selected ? " · 当前审查文件" : ""}</span></label><div class="artifact-actions">${isPdf ? `<button type="button" data-preview-artifact="${esc(item.path)}">预览</button>` : ""}<a href="${artifactUrl(job.id, item.path)}">下载</a></div></div>`;
+    }).join("") : '<p class="muted-note">没有文件产物。</p>';
+    setReviewPdf(job, reviewPdf);
+    $$('[data-preview-artifact]').forEach((button) => {
+      button.onclick = () => {
+        const item = artifacts.find((artifact) => artifact.path === button.dataset.previewArtifact);
+        if (!item) return;
+        state.reviewArtifactPath = item.path;
+        $$('[data-artifact-path]').forEach((input) => { input.checked = input.dataset.artifactPath === item.path; });
+        setReviewPdf(job, item);
+      };
+    });
+    $$('[data-artifact-path]').forEach((input) => {
+      input.onchange = () => {
+        const item = artifacts.find((artifact) => artifact.path === input.dataset.artifactPath);
+        if (input.checked && item?.name.toLowerCase().endsWith(".pdf")) {
+          state.reviewArtifactPath = item.path;
+          setReviewPdf(job, item);
+        }
+      };
+    });
     const allowed = (job.submission_types || []).filter((item) => ["online_text_entry", "online_upload"].includes(item));
     $("#submission-type").innerHTML = allowed.map((item) => `<option value="${item}">${item === "online_upload" ? "文件上传" : "文本输入"}</option>`).join("");
     $("#reviewed-check").checked = false;
@@ -294,6 +322,40 @@ async function openReview(jobId) {
     if (job.test_mode) setApprovalMessage("这是已完成作业的测试草稿：可以编辑和下载 PDF，但永久不能批准或提交。", false);
     showReview(true);
   } catch (err) { banner(err.message, true); }
+}
+
+function preferredReviewPdf(artifacts) {
+  const pdfs = artifacts.filter((item) => item.name.toLowerCase().endsWith(".pdf"));
+  return pdfs.find((item) => item.name === "reviewed-answer.pdf")
+    || pdfs.find((item) => item.name === "submission-ready.pdf")
+    || pdfs.find((item) => item.name === "final-answer.pdf")
+    || pdfs[0]
+    || null;
+}
+
+function artifactUrl(jobId, path, preview = false) {
+  const encoded = path.split("/").map(encodeURIComponent).join("/");
+  return `/api/agent/jobs/${jobId}/artifacts/${encoded}${preview ? "?preview=1" : ""}`;
+}
+
+function setReviewPdf(job, artifact) {
+  const frame = $("#review-pdf");
+  const empty = $("#review-pdf-empty");
+  const download = $("#review-file-download");
+  if (!artifact) {
+    frame.classList.add("hidden");
+    frame.removeAttribute("src");
+    empty.classList.remove("hidden");
+    $("#review-file-name").textContent = "没有 PDF";
+    download.classList.add("hidden");
+    return;
+  }
+  $("#review-file-name").textContent = artifact.name;
+  download.href = artifactUrl(job.id, artifact.path);
+  download.classList.remove("hidden");
+  empty.classList.add("hidden");
+  frame.classList.remove("hidden");
+  frame.src = `${artifactUrl(job.id, artifact.path, true)}&v=${encodeURIComponent(job.updated_at || "")}`;
 }
 
 async function saveReviewedDraft() {
@@ -313,6 +375,10 @@ async function saveReviewedDraft() {
 async function approveCurrentJob() {
   if (!state.currentJob) return;
   const artifactPaths = $$('[data-artifact-path]:checked').map((item) => item.dataset.artifactPath);
+  if ($("#submission-type").value === "online_upload" && state.reviewArtifactPath && !artifactPaths.includes(state.reviewArtifactPath)) {
+    setApprovalMessage("正在预览的待提交 PDF 尚未被选中，不能保存批准。", true);
+    return;
+  }
   try {
     const result = await api(`/api/agent/jobs/${state.currentJob.id}/approve`, {
       method: "POST",

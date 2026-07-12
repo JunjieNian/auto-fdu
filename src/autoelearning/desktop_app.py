@@ -252,7 +252,10 @@ def download_agent_artifact(job_id: int, artifact_path: str):
         path = _job_file(job, Path(job["workspace"]) / artifact_path)
     except Exception:
         return _error("产物路径无效。", 404)
-    return send_file(path, as_attachment=True, download_name=path.name)
+    preview = request.args.get("preview") == "1" and path.suffix.lower() == ".pdf"
+    response = send_file(path, as_attachment=not preview, download_name=path.name)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 def _apply_assignment_gate(
