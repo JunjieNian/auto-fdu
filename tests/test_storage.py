@@ -100,3 +100,46 @@ def test_completed_assignment_test_mode_can_never_be_approved(tmp_path: Path):
                 store, job_id, reviewed=True, confirmation="Completed homework",
                 submission_type="online_upload", artifact_paths=["output/final-answer.md"],
             )
+
+
+def test_agent_messages_persist_in_order(tmp_path: Path):
+    with Store(tmp_path / "messages.sqlite3") as store:
+        store.upsert_courses([{"id": 1, "name": "Course"}])
+        store.upsert_assignments(1, [{"id": 2, "name": "Homework"}])
+        job_id = store.create_agent_job(2, 1)
+        store.add_agent_message(job_id, "user", "Add a missing proof.")
+        store.add_agent_message(job_id, "assistant", "The proof and PDF were updated.")
+        assert [item["role"] for item in store.list_agent_messages(job_id)] == [
+            "user", "assistant",
+        ]
+
+
+def test_approval_must_include_current_submission_pdf(tmp_path: Path):
+    workspace = tmp_path / "job"
+    output = workspace / "output"
+    output.mkdir(parents=True)
+    draft = output / "final-answer.md"
+    draft.write_text("review me", encoding="utf-8")
+    wrong = output / "final-answer.pdf"
+    wrong.write_bytes(b"review")
+    expected = output / "submission-ready.pdf"
+    expected.write_bytes(b"submission")
+    with Store(tmp_path / "approval.sqlite3") as store:
+        store.upsert_courses([{"id": 1, "name": "Course"}])
+        store.upsert_assignments(1, [{
+            "id": 2, "name": "Homework", "submission_types": ["online_upload"],
+        }])
+        job_id = store.create_agent_job(2, 1)
+        store.update_agent_job(
+            job_id, status="draft_ready", workspace=str(workspace), draft_path=str(draft),
+            submission_artifact_path="output/submission-ready.pdf",
+            artifacts_json=[
+                {"path": "output/final-answer.pdf", "name": wrong.name, "size": 6},
+                {"path": "output/submission-ready.pdf", "name": expected.name, "size": 10},
+            ],
+        )
+        with pytest.raises(ApprovalError, match="当前显示"):
+            approve_job(
+                store, job_id, reviewed=True, confirmation="Homework",
+                submission_type="online_upload", artifact_paths=["output/final-answer.pdf"],
+            )

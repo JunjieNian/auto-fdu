@@ -53,7 +53,11 @@ def render_markdown_pdf(
             "",
             normalized,
         )
-    if _render_with_pandoc(normalized, pdf_path, title=title, course=course):
+        normalized = re.sub(r"(?m)^#\s+.+\n+", "", normalized, count=1)
+    if _render_with_pandoc(
+        normalized, pdf_path, title=title, course=course,
+        submission_copy=submission_copy,
+    ):
         return pdf_path
 
     font = _register_font()
@@ -112,7 +116,10 @@ def render_markdown_pdf(
     return pdf_path
 
 
-def _render_with_pandoc(text: str, pdf_path: Path, *, title: str, course: str) -> bool:
+def _render_with_pandoc(
+    text: str, pdf_path: Path, *, title: str, course: str,
+    submission_copy: bool,
+) -> bool:
     try:
         import pypandoc
 
@@ -125,10 +132,8 @@ def _render_with_pandoc(text: str, pdf_path: Path, *, title: str, course: str) -
         text = re.sub(r"(?m)^#\s+.*Reviewable Draft\s*$\n?", "", text, count=1)
         yaml_title = title.replace('"', "'")
         yaml_course = course.replace('"', "'")
-        text = (
-            f'---\ntitle: "{yaml_title}"\nsubtitle: "{yaml_course}"\n'
-            'date: "Agent draft - review required before use"\n---\n\n' + text
-        )
+        date_line = "" if submission_copy else 'date: "Agent draft - review required before use"\n'
+        text = f'---\ntitle: "{yaml_title}"\nsubtitle: "{yaml_course}"\n{date_line}---\n\n' + text
         pypandoc.convert_text(
             text,
             to="pdf",

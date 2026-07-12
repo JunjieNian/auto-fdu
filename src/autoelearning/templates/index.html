@@ -6,6 +6,7 @@
   <meta name="theme-color" content="#17243d">
   <title>eLearning 助手</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='conversation.css') }}">
 </head>
 <body>
   <div class="app-shell">
@@ -129,13 +130,31 @@
         <button id="review-close" class="icon-button" aria-label="关闭">×</button>
       </div>
       <div id="review-status" class="review-status"></div>
-      <label class="review-label">可编辑草稿<textarea id="review-draft" rows="16" spellcheck="false"></textarea></label>
+      <section class="pdf-review-panel">
+        <div class="pdf-review-heading">
+          <div><p class="eyebrow">SUBMISSION PREVIEW</p><h3>正在审查：<span id="review-file-name">待提交 PDF</span></h3></div>
+          <a id="review-file-download" class="secondary-button" href="#">下载当前文件</a>
+        </div>
+        <iframe id="review-pdf" title="待提交 PDF 预览"></iframe>
+        <div id="review-pdf-empty" class="empty hidden">没有可预览的 PDF，请检查下方文件产物。</div>
+      </section>
+      <div class="review-files-heading"><strong>本次批准将使用的文件</strong><span>默认只选择上方正在预览的待提交 PDF</span></div>
       <div id="artifact-list" class="artifact-list"></div>
-      <div class="review-actions"><button id="save-draft-button" class="secondary-button">保存修改</button></div>
+      <section class="agent-conversation">
+        <div class="conversation-heading"><div><p class="eyebrow">CONTINUE WITH AGENT</p><h3>继续要求 Agent 修改</h3></div><span>每一轮修改都会撤销旧批准并重新生成 PDF</span></div>
+        <div id="agent-message-list" class="agent-message-list"></div>
+        <label class="review-label">本轮修改要求<textarea id="agent-message-input" rows="3" maxlength="4000" placeholder="例如：补充第二题的证明，并将最终文件改名为 homework11-revised.pdf"></textarea></label>
+        <div class="review-actions"><button id="send-agent-message" class="primary-button">发送并重新生成</button></div>
+      </section>
+      <details class="source-editor">
+        <summary>高级：查看或编辑 Markdown 源稿</summary>
+        <label class="review-label">源稿内容<textarea id="review-draft" rows="16" spellcheck="false"></textarea></label>
+        <div class="review-actions"><button id="save-draft-button" class="secondary-button">保存修改并重新生成 PDF</button></div>
+      </details>
       <div class="approval-box">
         <h3>批准准备提交</h3>
         <p>批准不会立即提交。请输入完整作业标题，批准令牌十分钟后失效。</p>
-        <label class="check-row"><input id="reviewed-check" type="checkbox"> 我已阅读并核对草稿及所有选中的文件</label>
+        <label class="check-row"><input id="reviewed-check" type="checkbox"> 我已逐页阅读上方待提交 PDF，并核对所有选中的文件</label>
         <label class="review-label">提交形式<select id="submission-type"></select></label>
         <label class="review-label">审查备注<textarea id="review-notes" rows="2" placeholder="可选：记录修改或检查结果"></textarea></label>
         <label class="review-label">输入作业标题确认<input id="approval-confirmation" autocomplete="off"></label>

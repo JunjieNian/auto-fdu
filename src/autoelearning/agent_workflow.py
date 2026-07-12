@@ -67,7 +67,7 @@ class CodexDraftAgent:
             )
             with Store(self.settings.database_path) as store:
                 store.update_agent_job(job_id, status="running", manifest_json=manifest)
-            exit_code, draft_path, artifacts = self._run_codex(workspace, manifest)
+            exit_code, draft_path, artifacts, submission_path = self._run_codex(workspace, manifest)
             if exit_code != 0:
                 raise DraftAgentError(f"Codex exited with code {exit_code}; see codex.log")
             with Store(self.settings.database_path) as store:
@@ -76,7 +76,41 @@ class CodexDraftAgent:
                     status="draft_ready",
                     draft_path=str(draft_path),
                     artifacts_json=artifacts,
+                    submission_artifact_path=submission_path,
                     codex_exit_code=exit_code,
+                )
+        except Exception as exc:
+            with Store(self.settings.database_path) as store:
+                store.update_agent_job(job_id, status="failed", error=str(exc))
+            raise
+
+    def revise_job(self, job_id: int) -> None:
+        with Store(self.settings.database_path) as store:
+            job = store.get_agent_job(job_id)
+            if not job or not job.get("workspace") or not job.get("manifest"):
+                raise DraftAgentError("The original Agent workspace is unavailable")
+            workspace = Path(job["workspace"])
+            if not workspace.is_dir():
+                raise DraftAgentError("The original Agent workspace no longer exists")
+            messages = store.list_agent_messages(job_id)
+            store.update_agent_job(
+                job_id, status="revising", pending_action="revision", error=None,
+                approved_artifacts_json=None, submission_type=None, approved_at=None,
+                approval_token=None, approval_expires_at=None,
+            )
+
+        try:
+            exit_code, draft_path, artifacts, submission_path, reply = self._run_revision(
+                workspace, job["manifest"], messages, job.get("submission_artifact_path")
+            )
+            if exit_code != 0:
+                raise DraftAgentError(f"Codex revision exited with code {exit_code}; see codex.log")
+            with Store(self.settings.database_path) as store:
+                store.add_agent_message(job_id, "assistant", reply)
+                store.update_agent_job(
+                    job_id, status="draft_ready", pending_action="draft",
+                    draft_path=str(draft_path), artifacts_json=artifacts,
+                    submission_artifact_path=submission_path, codex_exit_code=exit_code,
                 )
         except Exception as exc:
             with Store(self.settings.database_path) as store:
@@ -212,7 +246,9 @@ class CodexDraftAgent:
             "content_type": response.headers.get("content-type") or mimetypes.guess_type(target.name)[0],
         }
 
-    def _run_codex(self, workspace: Path, manifest: dict[str, Any]) -> tuple[int, Path, list[dict[str, Any]]]:
+    def _run_codex(
+        self, workspace: Path, manifest: dict[str, Any]
+    ) -> tuple[int, Path, list[dict[str, Any]], str]:
         codex = shutil.which("codex")
         if not codex:
             raise DraftAgentError("Codex CLI is not installed or not available on PATH")
@@ -286,7 +322,95 @@ The student will review and may edit every artifact before a separate approval s
                 submission_copy=True,
             )
         artifacts = _list_artifacts(workspace / "output")
-        return result.returncode, final_answer, artifacts
+        return result.returncode, final_answer, artifacts, "output/submission-ready.pdf"
+
+    def _run_revision(
+        self, workspace: Path, manifest: dict[str, Any], messages: list[dict[str, Any]],
+        previous_submission_path: str | None,
+    ) -> tuple[int, Path, list[dict[str, Any]], str, str]:
+        codex = shutil.which("codex")
+        if not codex:
+            raise DraftAgentError("Codex CLI is not installed or not available on PATH")
+        conversation = workspace / "conversation.json"
+        conversation.write_text(
+            json.dumps(messages, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        final_answer = workspace / "output" / "final-answer.md"
+        if not final_answer.exists():
+            raise DraftAgentError("The existing draft is missing")
+        last_message = workspace / "output" / "agent-last-message.md"
+        prompt = """You are continuing an existing assignment drafting conversation.
+
+Work only inside this directory. Read ASSIGNMENT.md, assignment.json, conversation.json, the existing output/final-answer.md, and useful context files. Apply every user revision request in conversation.json to the existing answer while preserving correct work that was not requested to change.
+
+Requirements:
+1. Replace output/final-answer.md with the complete revised answer, not a patch or commentary.
+2. Never access eLearning, upload, submit, or claim submission.
+3. Do not invent personal details. Only add a name or student ID if the user explicitly supplied and requested it.
+4. If the user requests a filename, write only the safe PDF basename to output/submission-filename.txt. Otherwise leave that file absent.
+5. Put a concise explanation of what changed in your final response.
+6. Keep assumptions and self-check information in the Markdown source; the submission PDF renderer may remove internal review sections.
+"""
+        command = [
+            codex, "exec", "--ephemeral", "--skip-git-repo-check",
+            "--disable", "plugins", "--disable", "apps", "--disable", "browser_use",
+            "--disable", "computer_use", "--disable", "image_generation",
+            "-c", "mcp_servers={}",
+            "-s", "workspace-write", "-C", str(workspace), "--color", "never",
+            "-o", str(last_message), "-",
+        ]
+        env = os.environ.copy()
+        for key in ("ELEARNING_USERNAME", "ELEARNING_PASSWORD", "ELEARNING_WEBHOOK_URL"):
+            env.pop(key, None)
+        result = subprocess.run(
+            command, input=prompt, text=True, capture_output=True, encoding="utf-8",
+            errors="replace", env=env, timeout=self.settings.agent_timeout_seconds,
+        )
+        (workspace / "codex.log").write_text(
+            result.stdout + "\n--- STDERR ---\n" + result.stderr, encoding="utf-8"
+        )
+        if not final_answer.exists():
+            raise DraftAgentError("Codex revision removed the main draft")
+
+        output = workspace / "output"
+        managed = {
+            output / "final-answer.pdf", output / "submission-ready.pdf",
+            output / "reviewed-answer.pdf",
+        }
+        if previous_submission_path:
+            previous = (workspace / previous_submission_path).resolve()
+            try:
+                previous.relative_to(output.resolve())
+                managed.add(previous)
+            except ValueError:
+                pass
+        for path in managed:
+            path.unlink(missing_ok=True)
+
+        assignment = manifest.get("assignment") or {}
+        render_markdown_pdf(
+            final_answer, output / "final-answer.pdf",
+            title=assignment.get("name") or "Assignment Draft",
+            course=assignment.get("course_name") or "eLearning",
+        )
+        filename_file = output / "submission-filename.txt"
+        requested = filename_file.read_text(encoding="utf-8").strip() if filename_file.exists() else ""
+        submission_name = _safe_filename(Path(requested).name) if requested else "submission-ready.pdf"
+        if not submission_name.lower().endswith(".pdf"):
+            submission_name += ".pdf"
+        submission_pdf = output / submission_name
+        render_markdown_pdf(
+            final_answer, submission_pdf,
+            title=assignment.get("name") or "Assignment",
+            course=assignment.get("course_name") or "eLearning",
+            submission_copy=True,
+        )
+        artifacts = _list_artifacts(output)
+        reply = last_message.read_text(encoding="utf-8").strip() if last_message.exists() else "Revision completed."
+        return (
+            result.returncode, final_answer, artifacts,
+            str(submission_pdf.relative_to(workspace)).replace("\\", "/"), reply,
+        )
 
 
 def select_relevant_materials(
